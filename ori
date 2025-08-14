@@ -1,0 +1,226 @@
+<!DOCTYPE html>
+<html lang="he" dir="rtl">
+<head>
+<meta charset="UTF-8" />
+<meta name="viewport" content="width=device-width, initial-scale=1" />
+<title>מלך הקיטו: מצוד הפשטידה</title>
+<style>
+  :root{ --w: 900px; --h: 600px; --shadow: rgba(0,0,0,.55); }
+  *{box-sizing:border-box}
+  body{
+    margin:0;background:#111;color:#fff;font-family:system-ui, Arial, "Segoe UI", sans-serif;
+    display:flex;align-items:center;justify-content:center;min-height:100vh;
+  }
+  .wrap{position:relative;width:var(--w);max-width:100vw}
+  canvas{
+    width:100%;height:calc(var(--h) * 1px);display:block;
+    background:url('https://i.postimg.cc/TwG3CYtF/4.png') no-repeat center/cover;
+    image-rendering: pixelated;
+  }
+  .overlay{position:absolute;inset:0;display:flex;align-items:center;justify-content:center;background:rgba(0,0,0,.45)}
+  .card{width:min(92%,560px);background:rgba(20,20,20,.9);border:1px solid #2b2b2b;border-radius:20px;padding:22px 20px;box-shadow:0 10px 30px var(--shadow);text-align:center}
+  h1{margin:8px 0 4px;font-size:clamp(22px,3.8vw,34px)}
+  p{margin:8px 0 0;line-height:1.55}
+  ul{margin:12px 0 0;text-align:right}
+  .btn{margin-top:14px;cursor:pointer;border:0;border-radius:14px;padding:12px 18px;background:#2dd4bf;color:#001b18;font-weight:700;font-size:18px;box-shadow:0 6px 16px rgba(45,212,191,.35)}
+  .hud{position:absolute;left:12px;top:10px;font-weight:700;text-shadow:0 2px 6px rgba(0,0,0,.6)}
+</style>
+</head>
+<body>
+  <div class="wrap" style="height:calc(var(--h) * 1px);">
+    <canvas id="game" width="900" height="600"></canvas>
+    <div class="hud" id="hud">ניקוד: 0 · זמן: 40</div>
+    <div class="overlay" id="startOverlay">
+      <div class="card">
+        <h1>מלך הקיטו: מצוד הפשטידה</h1>
+        <p>
+          עכשיו זה אישי: <strong>נופלים רק מאכלים לא־קיטוגניים</strong>. אורי רץ מצד לצד ויורה קרן אור מהמרית כדי
+          <strong>להשמיד אותם לפני שיגיעו לרבע התחתון</strong>. מהרגע שהם נכנסים לרבע התחתון – הם חסינים ונוחתים על הפשטידה.
+        </p>
+        <ul>
+          <li>הזזת אורי: חצים ◀ ▶</li>
+          <li>ירי: רווח (Space) – קרן זריזה, חודרת עד 5 מטרות</li>
+          <li>משך משחק: <strong>40 שניות</strong></li>
+          <li>מטרה: להשאיר כמה שיותר מהפשטידה נקייה מלא־קיטו שנחת</li>
+        </ul>
+        <button class="btn" id="startBtn">מתחילים</button>
+      </div>
+    </div>
+  </div>
+<script>
+// ===================== הגדרות בסיס =====================
+window.addEventListener('DOMContentLoaded', () => {
+  const canvas = document.getElementById('game');
+  const ctx = canvas.getContext('2d');
+  ctx.imageSmoothingEnabled = false;
+
+  const STATE = { START: 0, PLAY: 1, OVER: 2 };
+  let state = STATE.START;
+  const hud = document.getElementById('hud');
+
+  // --- קבועים (קל יותר) ---
+  const GAME_DURATION = 40;        // שניות
+  const CAS_RATIO     = 0.72;      // הפשטידה נמוכה יותר – יותר מרחק לירי
+  const SAFE_QUARTER  = 0.82;      // אזור חסינות נמוך יותר – יותר זמן לפגיעה
+  const FIRE_COOLDOWN = 90;        // ms (ירי מהיר יותר)
+  const SPAWN_EVERY   = 950;       // ms (פחות עומס)
+  const MAX_PIERCE    = 5;         // הקרן חודרת יותר מטרות
+  const DROP_MIN_SPD  = 1.6, DROP_MAX_SPD = 2.8; // נפילה איטית יותר
+
+  // --- שחקן ---
+  const player = { x: canvas.width / 2 - 32, y: canvas.height - 96, w: 72, h: 88, speed: 7 };
+  const playerImg = new Image();
+  playerImg.src = 'https://i.postimg.cc/sfbHGQ1V/Chat-GPT-Image-Aug-14-2025-10-12-34-PM.png';
+
+  function drawPlayer(px, py){
+    if (playerImg.complete) { ctx.drawImage(playerImg, px, py, player.w, player.h); }
+    else { ctx.fillStyle = '#3fbf8a'; ctx.fillRect(px, py, player.w, player.h); }
+  }
+
+  // --- מטרות: רק לא־קיטוגניים ---
+  const NON  = ['🍞','🥐','🥖','🍝','🍰','🍩','🥔','🍟','🍪','🍕'];
+  const drops = [];
+  function spawnDrop(){
+    const emoji = NON[Math.floor(Math.random()*NON.length)];
+    const size  = 40 + Math.random()*18;
+    drops.push({ x: Math.random()*(canvas.width - size), y: -size, size, vy: DROP_MIN_SPD + Math.random()*(DROP_MAX_SPD - DROP_MIN_SPD), emoji, landed:false, shielded:false });
+  }
+
+  // --- קרניים ---
+  const beams = []; let lastFire = 0;
+  function fireBeam(){
+    const now = performance.now();
+    if(now - lastFire < FIRE_COOLDOWN) return;
+    lastFire = now;
+    const originX = player.x + player.w*0.28;
+    const originY = player.y + player.h*0.35;
+    beams.push({ x: originX, y: originY, w: 12, h: 20, vx: 0, vy: -16, life: 160, pierce: MAX_PIERCE });
+  }
+
+  // --- קלט ---
+  const keys = new Set();
+  addEventListener('keydown', e=>{
+    if([' ','Spacebar','ArrowLeft','ArrowRight','ArrowUp','ArrowDown'].includes(e.key)) e.preventDefault();
+    if(e.key === ' ' || e.key === 'Spacebar'){ fireBeam(); }
+    keys.add(e.key);
+  });
+  addEventListener('keyup',   e=>{ keys.delete(e.key); });
+
+  // --- ניקוד/טיימר ---
+  let score = 0, timeLeft = GAME_DURATION, totalSpawned = 0, landedBad = 0;
+  let rafId = null, spawnInterval = null, timerInterval = null;
+
+  function updateHud(){ hud.textContent = `ניקוד: ${score} · זמן: ${timeLeft}`; }
+
+  function startGame(){
+    score=0; timeLeft=GAME_DURATION; totalSpawned=0; landedBad=0; drops.length=0; beams.length=0;
+    player.x = canvas.width/2 - player.w/2; state = STATE.PLAY;
+    spawnInterval = setInterval(()=>{ spawnDrop(); totalSpawned++; }, SPAWN_EVERY);
+    timerInterval = setInterval(()=>{ timeLeft--; if(timeLeft<=0) endGame(); updateHud(); }, 1000);
+    document.getElementById('startOverlay').style.display = 'none';
+    loop(); updateHud();
+  }
+
+  function endGame(){
+    state = STATE.OVER; clearInterval(spawnInterval); clearInterval(timerInterval); if(rafId) cancelAnimationFrame(rafId);
+    const cleanPct = totalSpawned === 0 ? 100 : Math.max(0, 100 - Math.round((landedBad/Math.max(1,totalSpawned))*100));
+    const verdict =
+      cleanPct >= 90 ? "אתה גיבור על! הפשטידה רק קצת לא קיטוגנית."
+    : cleanPct >= 75 ? "זיהמת את הפשטידה, אבל רק קצת. אפשר לפזר על הלחם הזה בייקון, אל תדאג."
+    : cleanPct >= 50 ? "הפשטידה קיטוגנית כמו שהפאי שקרין גורן מכינה קיטוגני."
+    : cleanPct >= 25 ? "מה זה, פשטידת לחם?? לגרדום!"
+                     : "שלחנו את הפשטידה לשימור במוזיאון השומנים. 🏛️";
+
+    const card = document.querySelector('.card');
+    card.querySelector('h1').textContent = 'נגמר הזמן!';
+    card.querySelector('p').innerHTML = `ניקוד: <b>${score}</b><br>לא־קיטו שנחתו: <b>${landedBad}</b> / ${totalSpawned}<br>` +
+      `אחוז פשטידה נקייה: <b>${cleanPct}%</b><br>${verdict}`;
+    card.querySelector('ul').style.display = 'none';
+    document.getElementById('startBtn').textContent = 'שחקו שוב';
+    document.getElementById('startOverlay').style.display = 'flex';
+  }
+
+  function rectsCollide(ax,ay,aw,ah,bx,by,bw,bh){ return ax < bx + bw && ax + aw > bx && ay < by + bh && ay + ah > by; }
+
+  // ===================== לולאת המשחק =====================
+  function update(){
+    if(state !== STATE.PLAY) return;
+    if(keys.has('ArrowLeft'))  player.x -= player.speed;
+    if(keys.has('ArrowRight')) player.x += player.speed;
+
+    // ירי רציף אם מחזיקים רווח
+    if(keys.has(' ') || keys.has('Spacebar')) fireBeam();
+
+    player.x = Math.max(0, Math.min(canvas.width - player.w, player.x));
+
+    const casseroleY = canvas.height * CAS_RATIO;
+    const shieldY    = canvas.height * SAFE_QUARTER;
+
+    // נפילה ונחיתה
+    for(let i=drops.length-1;i>=0;i--){
+      const d = drops[i];
+      if(!d.landed){
+        d.y += d.vy;
+        if(!d.shielded && d.y >= shieldY - d.size) d.shielded = true;
+        if(d.y + d.size >= casseroleY){ d.y = casseroleY - d.size; d.landed = true; landedBad++; }
+      }
+    }
+
+    // קרניים
+    for(let i=beams.length-1;i>=0;i--){
+      const b = beams[i]; b.x += b.vx; b.y += b.vy; b.life--;
+      for(let j=drops.length-1;j>=0;j--){
+        const d = drops[j];
+        if(!d.landed && !d.shielded && rectsCollide(b.x, b.y, b.w, b.h, d.x, d.y, d.size, d.size)){
+          score += 2; drops.splice(j,1); if(--b.pierce <= 0){ beams.splice(i,1); } break;
+        }
+      }
+      if(b.life<=0 || b.y < -40 || b.x < -40 || b.x > canvas.width+40){ beams.splice(i,1); }
+    }
+  }
+
+  function draw(){
+    ctx.clearRect(0,0,canvas.width,canvas.height);
+    const casseroleY = canvas.height*CAS_RATIO;
+    ctx.strokeStyle = 'rgba(255,255,255,.15)'; ctx.beginPath(); ctx.moveTo(0, casseroleY); ctx.lineTo(canvas.width, casseroleY); ctx.stroke();
+    const shieldY = canvas.height*SAFE_QUARTER;
+    ctx.setLineDash([6,6]); ctx.strokeStyle = 'rgba(255,255,255,.10)'; ctx.beginPath(); ctx.moveTo(0, shieldY); ctx.lineTo(canvas.width, shieldY); ctx.stroke(); ctx.setLineDash([]);
+
+    // שחקן
+    drawPlayer(player.x, player.y);
+
+    // פריטים – רקע עגול אטום + אמוג׳י באמצע
+    for(const d of drops){
+      const cx = d.x + d.size/2, cy = d.y + d.size/2, r = d.size*0.6;
+      ctx.fillStyle = '#ffffff'; ctx.beginPath(); ctx.arc(cx, cy, r, 0, Math.PI*2); ctx.fill();
+      ctx.font = `${d.size}px system-ui, 'Apple Color Emoji', 'Segoe UI Emoji'`; ctx.textAlign = 'center'; ctx.textBaseline = 'middle'; ctx.fillText(d.emoji, cx, cy);
+      if(d.shielded && !d.landed){ ctx.strokeStyle = 'rgba(255,216,0,.35)'; ctx.lineWidth = 2; ctx.beginPath(); ctx.arc(cx, cy, r+4, 0, Math.PI*2); ctx.stroke(); ctx.lineWidth = 1; }
+    }
+
+    // קרניים
+    for(const b of beams){ ctx.fillStyle = '#ffe46b'; ctx.fillRect(b.x, b.y, b.w, b.h); ctx.fillStyle = '#fff4ab'; ctx.fillRect(b.x-2, b.y-2, b.w+4, b.h+4); }
+
+    updateHud();
+  }
+
+  function loop(){ update(); draw(); rafId = requestAnimationFrame(loop); }
+
+  // ===================== מסכי פתיחה/סיום =====================
+  document.getElementById('startBtn').addEventListener('click', () => {
+    const card = document.querySelector('.card');
+    if(state === STATE.OVER){
+      card.querySelector('h1').textContent = 'מלך הקיטו: מצוד הפשטידה';
+      card.querySelector('p').innerHTML =
+        'עכשיו זה אישי: <strong>נופלים רק מאכלים לא־קיטוגניים</strong>. אורי רץ מצד לצד ויורה קרן אור מהמרית כדי <strong>להשמיד אותם לפני שיגיעו לרבע התחתון</strong>. מהרגע שהם נכנסים לרבע התחתון – חסינים ונוחתים.';
+      card.querySelector('ul').style.display = '';
+      document.getElementById('startBtn').textContent = 'מתחילים';
+    }
+    startGame();
+  });
+
+  // ניקוי משאבים אם סוגרים טאב
+  window.addEventListener('beforeunload', ()=>{ clearInterval(spawnInterval); clearInterval(timerInterval); if(rafId) cancelAnimationFrame(rafId); });
+});
+</script>
+</body>
+</html>
